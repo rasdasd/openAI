@@ -1,0 +1,300 @@
+import gym
+import random
+import tensorflow as tf
+import numpy as np
+from collections import deque
+from gym import wrappers
+
+env = gym.make('CartPole-v0')
+env = wrappers.Monitor(env, '/tmp/cartpolev0-rasdasd-0', force=True)
+print(env.action_space)
+print(env.observation_space)
+#raw_input("Press Any Key to continue...")
+
+n_observations = env.observation_space.high.__len__() # Input size, the observation space
+n_actions = env.action_space.n # Number of actions to be chosen on outputlayer
+ACTIONS = n_actions # number of valid actions
+
+ACTINGACTIONS = 1 # number of actions allowed ot be executed at once
+
+GAMMA = 0.99 # decay rate of past observations
+OBSERVE = 100. # EPISODES to observe before training
+EXPLORE = 100. # EPISODES over which to anneal epsilon
+FINAL_EPSILON = 0.05 # final value of epsilon
+INITIAL_EPSILON = 1.0 # starting value of epsilon
+REPLAY_MEMORY = 100000 # number of previous transitions to remember
+BATCH = 32 # size of minibatch
+K = 1 # only select an action every Kth frame, repeat prev for others
+FRAMES = 5
+
+#optimizer params
+LEARNING_RATE = 1.5e-3
+OPTIMIZER_EPSILON = 1.25e-2
+
+# Network Parameters
+
+inputLayerSize = n_observations #* FRAMES # observations + actions from last FRAMES frames
+
+# how many features to hold onto between states, all but the oldest frame
+#stateStaticSize = inputLayerSize - n_observations
+
+
+def weight_variable(shape):
+	initial = tf.truncated_normal(shape, stddev = 0.01)
+	return tf.Variable(initial)
+
+def bias_variable(shape):
+	initial = tf.constant(0.01, shape = shape)
+	return tf.Variable(initial)
+
+def conv2d(x, W, stride):
+	return tf.nn.conv2d(x, W, strides = [1, stride, stride, 1], padding = "SAME")
+
+def max_pool_2x2(x):
+	return tf.nn.max_pool(x, ksize = [1, 2, 2, 1], strides = [1, 2, 2, 1], padding = "SAME")
+
+def mat_mul(x, W):
+	return tf.matmul(x, W)
+
+# Create model
+def createNetwork():
+	x = tf.placeholder("float", [None, FRAMES, inputLayerSize])
+
+	'''
+	# network weights
+	W_conv1 = weight_variable([FRAMES, inputLayerSize, 1, 32])
+	b_conv1 = bias_variable([32])
+
+	W_conv2 = weight_variable([4, 4, 32, 64])
+	b_conv2 = bias_variable([64])
+
+	W_conv3 = weight_variable([3, 3, 64, 64])
+	b_conv3 = bias_variable([64])
+	
+	W_fc1 = weight_variable([64, 512])
+	b_fc1 = bias_variable([512])
+
+	W_fc2 = weight_variable([512, ACTIONS])
+	b_fc2 = bias_variable([ACTIONS])
+
+	# hidden layers
+	x_reshape = tf.reshape(x, [-1,FRAMES,inputLayerSize,1])
+	h_conv1 = tf.nn.relu(conv2d(x_reshape, W_conv1, 4) + b_conv1)
+	h_pool1 = max_pool_2x2(h_conv1)
+
+	h_conv2 = tf.nn.relu(conv2d(h_pool1, W_conv2, 2) + b_conv2)
+	#h_pool2 = max_pool_2x2(h_conv2)
+
+	h_conv3 = tf.nn.relu(conv2d(h_conv2, W_conv3, 1) + b_conv3)
+	#h_pool3 = max_pool_2x2(h_conv3)
+
+	#h_pool3_flat = tf.reshape(h_pool3, [-1, 256])
+	h_conv3_flat = tf.reshape(h_conv3, [-1, 64])
+
+	h_fc1 = tf.nn.relu(tf.matmul(h_conv3_flat, W_fc1) + b_fc1)
+
+	readout = mat_mul(h_fc1, W_fc2) + b_fc2
+	'''
+	# readout layer
+	layers = 3
+	start = 100
+	end = 75
+	delta = (start - end)//layers
+
+	x_flat = tf.reshape(x,[-1,FRAMES*inputLayerSize])
+	ph = x_flat
+	psize = FRAMES*inputLayerSize
+	for i in range(layers-1):
+		w = 0
+		b = 0
+		if i == 0:
+			w = weight_variable([psize, start])
+			b = bias_variable([start])
+			psize = start
+		else:
+			w = weight_variable([psize, psize - delta])
+			b = bias_variable([psize - delta])
+			psize = psize - delta
+		ph = tf.nn.relu(mat_mul(ph,w) + b)
+		
+	'''
+	w1 = weight_variable([FRAMES*inputLayerSize, 100])
+	b1 = bias_variable([100])
+	h1 = tf.nn.relu(mat_mul(x_flat,w1) + b1)
+	w2 = weight_variable([100, 75])
+	b2 = bias_variable([75])
+	h2 = tf.nn.relu(mat_mul(h1,w2) + b2)
+	'''
+
+	wout = weight_variable([psize,ACTIONS])
+	bout = bias_variable([ACTIONS])
+	readout = mat_mul(ph, wout) + bout
+
+
+	return x, readout
+
+
+
+
+def trainNetwork(s, readout, sess):
+	maxReward = float("-inf")
+	windowSize = 100
+	currentReward = 0
+	windowAverageQ = deque()
+	windowSum = 0
+	episode = 1
+	averageReward = float("-inf")
+	# define the cost function
+	a = tf.placeholder("float", [None, ACTIONS])
+	y = tf.placeholder("float", [None])
+	readout_action = tf.reduce_sum(tf.mul(readout, a), reduction_indices = 1)
+	cost = tf.reduce_mean(tf.square(y - readout_action))
+	#train_step = tf.train.AdamOptimizer(learning_rate = LEARNING_RATE, epsilon = OPTIMIZER_EPSILON).minimize(cost)
+	global_step = tf.Variable(0, trainable=False)
+	starter_learning_rate = LEARNING_RATE
+	learning_rate = tf.train.exponential_decay(starter_learning_rate, 
+		global_step,1000, 0.96, staircase=True
+	)
+	train_step = tf.train.AdamOptimizer(learning_rate = learning_rate,
+		epsilon = OPTIMIZER_EPSILON).minimize(cost, global_step = global_step)
+
+	# store the previous observations in replay memory
+	D = deque()
+
+	# printing
+	#a_file = open("logs_" + "GAME" + "/readout.txt", 'w')
+	#h_file = open("logs_" + "GAME" + "/hidden.txt", 'w')
+
+	# get the first state
+	x_t = env.reset()
+	r_0 = float("-inf")
+	terminal = False
+	no_op_action = 0;
+	s_t = np.tile(x_t, (FRAMES,1))
+	#for i in range(FRAMES-1):
+	#	s_t = np.append(s_t,x_t, axis = 2)
+
+	# loading networks
+	sess.run(tf.global_variables_initializer())
+	
+	epsilon = INITIAL_EPSILON
+	t = 0
+	while "pigs" != "fly" and averageReward < 195.0: # if pigs are flying we are done...
+		#if t > OBSERVE + EXPLORE and averageReward > 180:
+		#	env.render()
+		# choose an action epsilon greedily
+		readout_t = readout.eval(feed_dict = {s : [s_t]})[0]
+		a_t = np.zeros([ACTIONS])
+		action_index = 0
+		if random.random() <= epsilon or episode <= OBSERVE:
+			action_index = random.randrange(ACTIONS)
+			a_t[action_index] = 1
+		else:
+			action_index = np.argmax(readout_t)
+			a_t[action_index] = 1
+		# we can only do one action
+		#a_t = action_index
+		# scale down epsilon
+		if epsilon > FINAL_EPSILON and episode > OBSERVE:
+			epsilon -= (INITIAL_EPSILON - FINAL_EPSILON) / EXPLORE
+
+		for i in range(0, K): #K = 1, might need to rethink if K > 1
+			# run the selected action and observe next state and reward
+			x_t1, r_t, terminal, ret = env.step(action_index)
+			currentReward += r_t
+			s_t1 = s_t[0:FRAMES-1,:]
+			s_t1 = np.insert(s_t1, 0, x_t1, axis = 0)
+
+			# store the transition in D
+			D.append((s_t, a_t, r_t, s_t1, terminal))
+
+			if len(D) > REPLAY_MEMORY:
+				D.popleft()
+			if terminal:
+				x_t = env.reset()
+				r_0 = float("-inf")
+				terminal = False
+				no_op_action = 0;
+				s_t = np.tile(x_t, (FRAMES,1))
+				s_t 
+				#s_t1 = np.concatenate((x_t, x_t, x_t, x_t))
+				maxReward = max(maxReward, currentReward)
+				windowAverageQ.append(currentReward)
+				windowSum += currentReward
+				if len(windowAverageQ) > windowSize:
+					windowSum -= windowAverageQ.popleft()
+				averageReward = windowSum/(len(windowAverageQ)*1.0)
+				# print info
+				state = ""
+				if episode <= OBSERVE:
+					state = "observe"
+				elif episode > OBSERVE and episode <= OBSERVE + EXPLORE:
+					state = "explore"
+				else:
+					state = "train"
+				if averageReward >= 195:
+					print "done"
+				print averageReward, "\t", state, "\t", episode, "\t\t", currentReward
+				#print "episode: ", episode, "\tmaxReward: ", maxReward, "\treward: ", currentReward, "\tavgRew(20): ", averageReward, "\tstate: ", state
+				currentReward = 0
+				episode += 1
+
+		# only train if done observing
+		if episode > OBSERVE:
+			# sample a minibatch to train on
+			minibatch = random.sample(D, BATCH)
+
+			# get the batch variables
+			s_j_batch = [d[0] for d in minibatch]
+			a_batch = [d[1] for d in minibatch]
+			r_batch = [d[2] for d in minibatch]
+			s_j1_batch = [d[3] for d in minibatch]
+
+			y_batch = []
+			readout_j1_batch = readout.eval(feed_dict = {s : s_j1_batch})
+			for i in range(0, len(minibatch)):
+				# if terminal only equals reward
+				if minibatch[i][4]:
+					y_batch.append(r_batch[i])
+				else:
+					y_batch.append(r_batch[i] + GAMMA * np.max(readout_j1_batch[i]))
+
+			# perform gradient step
+			train_step.run(feed_dict = {
+				y : y_batch,
+				a : a_batch,
+				s : s_j_batch})
+
+		# update the old values
+		s_t = s_t1
+		t += 1
+
+		# print info
+		'''
+		state = ""
+		if t <= OBSERVE:
+			state = "observe"
+		elif t > OBSERVE and t <= OBSERVE + EXPLORE:
+			state = "explore"
+		else:
+			state = "train"
+		#print "TIMESTEP", t, "/ STATE", state, "/ EPSILON", epsilon, "/ ACTION", action_index, "/ REWARD", r_t, "/ Q_MAX %e" % np.max(readout_t)
+
+		# write info to files
+		'''
+		'''
+		if t % 10000 <= 100:
+			a_file.write(",".join([str(x) for x in readout_t]) + '\n')
+			h_file.write(",".join([str(x) for x in h_fc1.eval(feed_dict={s:[s_t]})[0]]) + '\n')
+			#cv2.imwrite("logs_game/frame" + str(t) + ".png", x_t1) #save gameframes for future
+		'''
+def playGame():
+	sess = tf.InteractiveSession()
+	s, readout = createNetwork()
+	trainNetwork(s, readout, sess)
+
+def main():
+	playGame()
+
+if __name__ == "__main__":
+	main()
